@@ -13,7 +13,7 @@ from mapping import ep_type
 from utils import env_in_github_workflow
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 API_SERVER = "https://api.bgm.tv"
 LOAD_WAIT_MS = 5000
