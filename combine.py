@@ -40,6 +40,10 @@ def main():
     with open(user_file, "r", encoding="u8") as f:
         user_meta = json.load(f)
 
+    if 'id' not in user_meta and 'username' in user_meta:
+        logging.warning("User object from API is missing 'id'. Using 'username' as a fallback for 'id'.")
+        user_meta['id'] = user_meta['username']
+    
     # 构建最终的 takeout.json 结构
     final_takeout = {
         "meta": {
