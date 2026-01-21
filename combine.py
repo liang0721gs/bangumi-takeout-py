@@ -1,41 +1,59 @@
-# 阶段三：合并结果并生成最终产物
-  combine:
-    needs: process # 等待所有 process 任务都完成后再开始
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+import json
+import time
+from pathlib import Path
+import logging
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.8
+logging.basicConfig(level=logging.INFO)
 
-      # --- 添加这个缺失的步骤 ---
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      # ---------------------------
+def main():
+    logging.info("Running Step: COMBINE")
+    
+    all_processed_data = []
+    
+    # Artifacts 会被下载到以它们名字命名的子目录中
+    # 我们的 artifact 名字是 processed-chunk-1, processed-chunk-2, ...
+    artifact_dirs = list(Path(".").glob("processed-chunk-*"))
+    if not artifact_dirs:
+        raise FileNotFoundError("No processed chunk directories found! Did the process jobs fail?")
+        
+    logging.info(f"Found {len(artifact_dirs)} artifact directories.")
 
-      - name: Download all processed chunks and base data
-        # 不指定 name 会下载本次工作流的所有 artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: . # 下载到当前目录
+    for part_dir in sorted(artifact_dirs, key=lambda p: int(p.name.split('-')[-1])):
+        chunk_num = part_dir.name.split('-')[-1]
+        json_file = part_dir / f"takeout-part-{chunk_num}.json"
+        
+        if json_file.exists():
+            logging.info(f"Loading data from {json_file}")
+            with open(json_file, "r", encoding="u8") as f:
+                data = json.load(f)
+                all_processed_data.extend(data)
+        else:
+            logging.warning(f"Warning: {json_file} not found in artifact directory.")
 
-      - name: (Step 3a) Combine all chunks
-        run: python combine.py
-      
-      - name: (Step 3b) Build HTML
-        run: python generate_html.py
-      
-      - name: (Step 3c) Build CSV
-        run: python generate_csv.py
+    logging.info(f"Total items combined: {len(all_processed_data)}")
 
-      - name: Upload final output file
-        uses: actions/upload-artifact@v4
-        with:
-          name: Output
-          path: |
-            takeout.json
-            takeout.html
-            takeout*.csv
+    # 从 base-data artifact 中加载 user 信息
+    user_file = Path("base-data/user.json")
+    if not user_file.exists():
+        raise FileNotFoundError("user.json not found in base-data directory!")
+        
+    with open(user_file, "r", encoding="u8") as f:
+        user_meta = json.load(f)
+
+    # 构建最终的 takeout.json 结构
+    final_takeout = {
+        "meta": {
+            "generated_at": time.time(),
+            "user": user_meta
+        },
+        "data": all_processed_data
+    }
+
+    with open("takeout.json", "w", encoding="u8") as f:
+        json.dump(final_takeout, f, ensure_ascii=False, indent=4)
+
+    logging.info("Successfully combined all parts into takeout.json.")
+    logging.info("Step COMBINE finished.")
+
+if __name__ == "__main__":
+    main()
