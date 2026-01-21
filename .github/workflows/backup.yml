@@ -89,7 +89,7 @@ jobs:
           name: processed-chunk-${{ matrix.chunk }}
           path: takeout-part-${{ matrix.chunk }}.json
 
-  # 阶段三：合并结果并生成最终产物
+# 阶段三：合并结果并生成最终产物
   combine:
     needs: process # 等待所有 process 任务都完成后再开始
     runs-on: ubuntu-latest
@@ -101,6 +101,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: 3.8
+
+      # --- 添加这个缺失的步骤 ---
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      # ---------------------------
 
       - name: Download all processed chunks and base data
         # 不指定 name 会下载本次工作流的所有 artifacts
