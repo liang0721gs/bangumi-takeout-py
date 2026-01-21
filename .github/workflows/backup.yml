@@ -9,21 +9,21 @@ on:
    workflow_dispatch:  # 也支持手动触发
 
 jobs:
-  build:
+  # 阶段一：准备基础数据
+  prepare:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5
         with:
           python-version: 3.8
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-
+      
       - name: Download and extract archive data
         run: |
           wget $(python utils.py) -O dump.zip --quiet
@@ -32,16 +32,92 @@ jobs:
       - name: Set up environment variables
         run: echo "BANGUMI_ACCESS_TOKEN=${{ secrets.BANGUMI_ACCESS_TOKEN }}" >> $GITHUB_ENV
 
-      - name: (Step 1) Fetch
-        run: python fetch.py
+      - name: (Step 1) Fetch base collection list
+        # 只运行 fetch.py 的准备步骤
+        run: python fetch.py --step prepare
+      
+      - name: Upload base data for next jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-data
+          path: |
+            collections.json
+            user.json
+            subject.jsonlines
+            episode.jsonlines
+            takeout.json  # 上传旧的 takeout.json (如果存在)
+          if-no-files-found: ignore # 如果文件不存在也不要报错
 
-      - name: (Step 2) Build HTML
+  # 阶段二：并行处理数据
+  process:
+    needs: prepare # 等待 prepare 任务完成后再开始
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # 在这里定义要并行运行多少个任务，可以根据你的收藏数量调整
+        # 4个并行任务意味着每个任务处理 1/4 的数据
+        chunk: [1, 2, 3, 4]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.8
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download base data from prepare job
+        uses: actions/download-artifact@v4
+        with:
+          name: base-data
+          path: base-data # 下载到 base-data 文件夹
+
+      - name: Set up environment variables
+        run: echo "BANGUMI_ACCESS_TOKEN=${{ secrets.BANGUMI_ACCESS_TOKEN }}" >> $GITHUB_ENV
+      
+      - name: (Step 2) Process chunk ${{ matrix.chunk }}
+        # 运行 fetch.py 的处理步骤，并传入总块数和当前块编号
+        run: python fetch.py --step process --total-chunks 4 --current-chunk ${{ matrix.chunk }}
+
+      - name: Upload processed chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: processed-chunk-${{ matrix.chunk }}
+          path: takeout-part-${{ matrix.chunk }}.json
+
+  # 阶段三：合并结果并生成最终产物
+  combine:
+    needs: process # 等待所有 process 任务都完成后再开始
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.8
+
+      - name: Download all processed chunks and base data
+        # 不指定 name 会下载本次工作流的所有 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: . # 下载到当前目录
+
+      - name: (Step 3a) Combine all chunks
+        run: python combine.py
+      
+      - name: (Step 3b) Build HTML
         run: python generate_html.py
       
-      - name: (Step 3) Build CSV
+      - name: (Step 3c) Build CSV
         run: python generate_csv.py
 
-      - name: Upload output file
+      - name: Upload final output file
         uses: actions/upload-artifact@v4
         with:
           name: Output
