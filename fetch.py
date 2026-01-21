@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import logging
 import os
+import argparse  # 新增：用于处理命令行参数
 
 import requests
 from tqdm import tqdm
@@ -13,7 +14,7 @@ from mapping import ep_type
 from utils import env_in_github_workflow
 
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO) # 将默认日志级别改为 INFO，避免过多 DEBUG 输出
 
 API_SERVER = "https://api.bgm.tv"
 LOAD_WAIT_MS = 5000
@@ -27,6 +28,7 @@ def get_json_with_bearer_token(url):
     logging.debug(f"load url: {url}")
     headers = {'Authorization': 'Bearer ' + ACCESS_TOKEN, 'accept': 'application/json', 'User-Agent': 'bangumi-takeout-python/v1'}
     response = requests.get(url, headers=headers)
+    response.raise_for_status() # 如果请求失败 (例如 4xx, 5xx 错误)，会抛出异常
     return response.json()
 
 def load_data_until_finish(endpoint, limit=30, name="", show_progress=False):
@@ -87,7 +89,8 @@ def load_subject_data_remote(item):
 
 def load_subject_data_local(items):
     subject_id_to_data_map = {item["subject_id"]:None for item in items}
-    with open("subject.jsonlines","r",encoding="u8") as f:
+    if not Path("./base-data/subject.jsonlines").exists(): return # 修改：检查下载的 artifact 路径
+    with open("./base-data/subject.jsonlines","r",encoding="u8") as f:
         for line in tqdm(f, desc="load subject locally"):
             subject = json.loads(line)
             if subject["id"] in subject_id_to_data_map.keys():
@@ -101,7 +104,6 @@ def load_episode_data_remote(item):
     endpoint = f"{API_SERVER}/v0/episodes?subject_id={item['subject_id']}"
     item["ep_data"] = {}
     for type_key in ep_type.keys():
-        # workaround: following api server spec
         if type_key not in [0,1,2,3,4,5,6]:
             continue
         ep_type_data = load_data_until_finish(f"{endpoint}&type={type_key}", limit=100, name="episode")
@@ -109,7 +111,8 @@ def load_episode_data_remote(item):
 
 def load_episode_data_local(items):
     subject_id_to_episode_map = {item["subject_id"]:{} for item in items}
-    with open("episode.jsonlines","r",encoding="u8") as f:
+    if not Path("./base-data/episode.jsonlines").exists(): return # 修改：检查下载的 artifact 路径
+    with open("./base-data/episode.jsonlines","r",encoding="u8") as f:
         for line in tqdm(f, desc="load episode locally"):
             episode = json.loads(line)
             if episode["subject_id"] in subject_id_to_episode_map.keys():
@@ -121,7 +124,6 @@ def load_episode_data_local(items):
 
 
 def load_progress_if_not_loaded(item):
-    # skip existing progress
     if "progress" in item:
         return
     logging.debug(f"loading progress, id={item['subject_id']}")
@@ -130,50 +132,48 @@ def load_progress_if_not_loaded(item):
 
 def load_user():
     global USERNAME_OR_UID
-
     logging.info("loading user info")
     endpoint = f"{API_SERVER}/v0/me"
     user_data = get_json_with_bearer_token(endpoint)
     USERNAME_OR_UID = user_data["username"]
+    with open("user.json", "w", encoding="u8") as f: # 新增：保存用户信息
+        json.dump(user_data, f, ensure_ascii=False, indent=4)
     return user_data
 
 def trigger_auth():
     global ACCESS_TOKEN
-
     if IN_GITHUB_WORKFLOW:
         logging.info("in Github workflow, reading from secrets")
         ACCESS_TOKEN = os.environ['BANGUMI_ACCESS_TOKEN']
         return
-
-
     if Path("./no_gui").exists():
         logging.info("no gui, skipping oauth")
     else:
         do_auth()
-
     if not Path("./.bgm_token").exists():
         raise Exception("no access token (auth failed?)")
-
     with open("./.bgm_token", "r", encoding="u8") as f:
         tokens = json.load(f)
         ACCESS_TOKEN = tokens["access_token"]
         logging.info("access token loaded")
-
     if not ACCESS_TOKEN:
         logging.error("ACCESS_TOKEN is empty!")
         raise Exception("need access token (auth failed?)")
 
 
 def load_locally_if_possible(collections):
-    if Path("./subject.jsonlines").exists() and Path("./episode.jsonlines").exists():
+    # 修改：在 Actions 中，本地数据来自上一步下载的 artifact
+    if IN_GITHUB_WORKFLOW and Path("./base-data").exists():
+        logging.info("Local data exists from artifact, will load from it")
+        load_subject_data_local(collections)
+        load_episode_data_local(collections)
+    elif Path("./subject.jsonlines").exists() and Path("./episode.jsonlines").exists():
         logging.info("local data exists, will load from local if possible")
+        load_subject_data_local(collections)
+        load_episode_data_local(collections)
     else:
         logging.info("local data not exists, will load from remote")
         return
-
-    logging.debug("load from local")
-    load_subject_data_local(collections)
-    load_episode_data_local(collections)
 
 def load_remotely_for_the_rest(collections):
     for item in tqdm(collections, desc="load from remote (not exist in local)"):
@@ -189,48 +189,88 @@ def copy_existing_progress_from_old_takeout(new_collection, old_takeout):
     existing_progress = {item["subject_id"]:{"progress": item["progress"], "updated_at": item["updated_at"]} 
                         for item in old_takeout["data"]}
     for item in new_collection:
-        # if the progress for that subject (item) has not been updated since last fetch
         if item["subject_id"] in existing_progress and item["updated_at"] == existing_progress[item["subject_id"]]["updated_at"]:
-            # just use the existing progress
             item["progress"] = existing_progress[item["subject_id"]]["progress"]
 
 def unix_timestamp_to_datetime_str(timestamp):
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d-%H-%M-%S")
 
 def load_progress_data(collections):
-    if Path("takeout.json").exists():
-        logging.info("takeout.json exists, will load from it")
+    # 修改：在 Actions 中，旧的 takeout.json 来自上一步下载的 artifact
+    old_takeout_path = Path("./base-data/takeout.json") if IN_GITHUB_WORKFLOW else Path("takeout.json")
+    if old_takeout_path.exists():
+        logging.info(f"{old_takeout_path} exists, will load from it")
         try:
-            with open("takeout.json", "r", encoding="u8") as f:
+            with open(old_takeout_path, "r", encoding="u8") as f:
                 old_takeout = json.load(f)
-            Path("takeout.json").rename(f'takeout_{unix_timestamp_to_datetime_str(old_takeout["meta"]["generated_at"])}.json')
+            # 重命名旧文件，在 process 步骤中不需要，可以在 combine 步骤中完成
+            # old_takeout_path.rename(f'takeout_{unix_timestamp_to_datetime_str(old_takeout["meta"]["generated_at"])}.json')
             copy_existing_progress_from_old_takeout(collections, old_takeout)
         except json.decoder.JSONDecodeError:
-            logging.info("empty takeout.json... seems to be Google Colab issue, skipping it")
+            logging.info(f"Empty {old_takeout_path}... skipping it")
 
     for item in tqdm(collections, desc="load view progress"):    
         load_progress_if_not_loaded(item)
 
-def write_to_json(user, collections):
-    takeout_data = {"meta": {"generated_at": time.time(), "user": user}, "data": collections}
-    with open("takeout.json","w",encoding="u8") as f:
-        json.dump(takeout_data, f, ensure_ascii=False, indent=4)
+# 主要逻辑拆分
+def step_prepare():
+    """第一步：准备阶段，只获取用户和完整的收藏列表"""
+    logging.info("Running Step: PREPARE")
+    trigger_auth()
+    load_user()
+    load_user_collections()
+    logging.info("Step PREPARE finished.")
+
+def step_process(total_chunks, current_chunk):
+    """第二步：处理阶段，处理分到的那一块数据"""
+    logging.info(f"Running Step: PROCESS (Chunk {current_chunk}/{total_chunks})")
+    trigger_auth()
+    
+    with open("./base-data/collections.json", "r", encoding="u8") as f:
+        collections = json.load(f)
+    
+    # 计算当前任务需要处理的数据切片
+    total_items = len(collections)
+    items_per_chunk = (total_items + total_chunks - 1) // total_chunks  # 向上取整
+    start_index = (current_chunk - 1) * items_per_chunk
+    end_index = start_index + items_per_chunk
+    my_chunk = collections[start_index:end_index]
+
+    if not my_chunk:
+        logging.info("This chunk is empty, nothing to do.")
+        # 创建一个空的输出文件以避免后续步骤失败
+        with open(f"takeout-part-{current_chunk}.json", "w", encoding="u8") as f:
+            json.dump([], f)
+        return
+
+    logging.info(f"Processing {len(my_chunk)} items (from index {start_index} to {end_index-1})")
+
+    # 对切片进行处理
+    load_locally_if_possible(my_chunk)
+    load_remotely_for_the_rest(my_chunk)
+    load_progress_data(my_chunk)
+
+    # 保存处理完的切片结果
+    output_filename = f"takeout-part-{current_chunk}.json"
+    with open(output_filename, "w", encoding="u8") as f:
+        json.dump(my_chunk, f, ensure_ascii=False, indent=4)
+    logging.info(f"Step PROCESS finished. Saved to {output_filename}")
+
 
 def main():
-    trigger_auth()
-
-    logging.info("begin fetch")
-
-    user = load_user()
-    collections = load_user_collections()
+    parser = argparse.ArgumentParser(description="Fetch Bangumi data with split steps for GitHub Actions.")
+    parser.add_argument("--step", required=True, choices=['prepare', 'process'], help="The step to execute.")
+    parser.add_argument("--total-chunks", type=int, default=4, help="Total number of chunks for processing.")
+    parser.add_argument("--current-chunk", type=int, help="The current chunk to process (for --step process).")
     
-    load_locally_if_possible(collections)
-    load_remotely_for_the_rest(collections)
-    load_progress_data(collections)
+    args = parser.parse_args()
 
-    write_to_json(user, collections)
-
-    logging.info("done")
+    if args.step == 'prepare':
+        step_prepare()
+    elif args.step == 'process':
+        if not args.current_chunk:
+            parser.error("--current-chunk is required for --step process")
+        step_process(args.total_chunks, args.current_chunk)
 
 if __name__ == "__main__":
     main()
