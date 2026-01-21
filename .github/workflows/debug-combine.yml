@@ -1,56 +1,51 @@
-name: DEBUG - Test Combine Job
+name: Backup Bangumi Data
 
 on:
-  workflow_dispatch: #只允许手动触发
+  # 注释：如果要定时执行，请解除以下部分的注释（删除掉行首的 # 即可）
+  # ----- 解除这行之后的注释（不包括这行）-----
+   schedule:
+     - cron: "0 3 * * 5"  # 运行时间：每周五凌晨三点
+  # ----- 解除这行之前的注释（不包括这行）-----
+   workflow_dispatch:  # 也支持手动触发
 
 jobs:
-  #跳过 prepare 和 process 任务，测试 combine
-  
-  combine:
-    #移除了 needs: process，让其独立运行
+  build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v3
         with:
           python-version: 3.8
 
-      #创建假的 process 产物
-      #模拟 download-artifact 步骤，否则后续脚本会因找不到文件而失败
-      - name: Create fake artifacts for testing
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download and extract archive data
         run: |
-          mkdir -p processed-chunk-1
-          echo '[]' > processed-chunk-1/takeout-part-1.json
-          mkdir -p base-data
-          echo '{}' > base-data/user.json
-      #模拟步骤结束
+          wget $(python utils.py) -O dump.zip --quiet
+          unzip dump.zip
 
-      #诊断目标
-      - name: 1. Run Diagnostics and Install Dependencies
-        run: |
-          echo "--- 1.1. Verifying file structure ---"
-          pwd
-          ls -lR
+      - name: Set up environment variables
+        run: echo "BANGUMI_ACCESS_TOKEN=${{ secrets.BANGUMI_ACCESS_TOKEN }}" >> $GITHUB_ENV
 
-          echo "--- 1.2. Verifying contents of requirements.txt ---"
-          cat requirements.txt
+      - name: (Step 1) Fetch
+        run: python fetch.py
 
-          echo "--- 1.3. Installing dependencies ---"
-          pip install -r requirements.txt
-
-          echo "--- 1.4. Verifying installed packages (This is the most important step!) ---"
-          pip list
-      #诊断步骤结束
-
-      # 后续步骤运行，看看错误是否复现
-      - name: 2. (Step 3a) Combine all chunks
-        run: python combine.py
-      
-      - name: 3. (Step 3b) Build HTML
+      - name: (Step 2) Build HTML
         run: python generate_html.py
       
-      - name: 4. (Step 3c) Build CSV
+      - name: (Step 3) Build CSV
         run: python generate_csv.py
+
+      - name: Upload output file
+        uses: actions/upload-artifact@v4
+        with:
+          name: Output
+          path: |
+            takeout.json
+            takeout.html
+            takeout*.csv
