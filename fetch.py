@@ -142,7 +142,7 @@ def trigger_auth():
 
     if IN_GITHUB_WORKFLOW:
         logging.info("in Github workflow, reading from secrets")
-        ACCESS_TOKEN = os.environ['BANGUMI_ACCESS_TOKEN']
+        ACCESS_TOKEN = os.environ['iCCBNpGnTrmV4nW5EmgOgYyZh8H7nxaSf5tecT20']
         return
 
 
